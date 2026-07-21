@@ -1,0 +1,95 @@
+name: Bug report
+description: Report a reproducible Nova Computer Use problem without sensitive data.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Nova Computer Use.
+
+        Do not upload screenshots, captured screens, passwords, tokens, personal data, or sensitive Accessibility text. Include only sanitized logs. Report suspected vulnerabilities privately through the Security tab instead of this form.
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: For example, macOS 15.5.
+      placeholder: macOS 15.5
+    validations:
+      required: true
+
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Mac architecture
+      options:
+        - Apple Silicon (arm64)
+        - Intel (x86_64)
+        - Unknown
+    validations:
+      required: true
+
+  - type: input
+    id: nova-version
+    attributes:
+      label: Nova version
+      description: Use a release version or commit SHA.
+      placeholder: Commit SHA or version
+    validations:
+      required: true
+
+  - type: input
+    id: codex-version
+    attributes:
+      label: Codex version
+      description: Include whether you use the CLI or desktop app.
+      placeholder: Codex CLI or desktop version
+    validations:
+      required: true
+
+  - type: input
+    id: error-code
+    attributes:
+      label: Exact error code
+      description: Copy only the stable Nova error code, without sensitive surrounding data.
+      placeholder: permission_denied_accessibility
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Describe the smallest safe sequence that reproduces the problem.
+      placeholder: |
+        1. Start Nova from a fresh Codex session.
+        2. Call ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: sanitized-logs
+    attributes:
+      label: Sanitized logs
+      description: Remove usernames, paths containing personal details, typed text, Accessibility text, tokens, and all other sensitive content. Never attach screenshots or screen captures.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: privacy-confirmation
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed sensitive data and did not upload screenshots, screen captures, or Accessibility text.
+          required: true

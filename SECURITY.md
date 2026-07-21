@@ -4,9 +4,9 @@
 
 **Do not open a public issue, discussion, or pull request for a suspected vulnerability.** Public reports can expose Nova users before a fix is available.
 
-Once the public repository exists and private vulnerability reporting is enabled, open the repository's **Security** tab and choose **Report a vulnerability**. Until that control is available, Nova does not claim an operational private reporting channel. Do not disclose the issue publicly; check this policy again after repository setup.
+Private vulnerability reporting is enabled. Open this repository's **Security** tab, choose **Report a vulnerability**, and submit the report there. Do not disclose the issue publicly.
 
-When reporting becomes available, include:
+Include:
 
 - the affected commit or version;
 - macOS version and Mac architecture;

@@ -2,7 +2,7 @@
 
 **Native, local-first Computer Use for Codex on Intel and Apple Silicon Macs.**
 
-[![CI status: setup pending](https://img.shields.io/badge/CI-setup%20pending-8a8a8a)](#development)
+[![CI](https://github.com/theodorebeaupre-prog/nova-computer-use/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/theodorebeaupre-prog/nova-computer-use/actions/workflows/ci.yml)
 [![macOS 15+](https://img.shields.io/badge/macOS-15%2B-000000?logo=apple)](#compatibility)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](Package.swift)
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-663399)](LICENSE)

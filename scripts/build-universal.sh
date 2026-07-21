@@ -22,8 +22,9 @@ trap cleanup EXIT
 
 build_product() {
     local architecture="$1"
+    local product="$2"
     local scratch_path="$scratch_root/$architecture"
-    swift build -c release --arch "$architecture" --scratch-path "$scratch_path"
+    swift build -c release --arch "$architecture" --product "$product" --scratch-path "$scratch_path"
 }
 
 require_product() {
@@ -55,8 +56,10 @@ make_universal_binary() {
     fi
 }
 
-build_product x86_64
-build_product arm64
+build_product x86_64 NovaComputerUseService
+build_product x86_64 NovaComputerUseMCP
+build_product arm64 NovaComputerUseService
+build_product arm64 NovaComputerUseMCP
 
 mkdir -p "$dist_root"
 stage_root="$scratch_root/NovaComputerUsePlugin"

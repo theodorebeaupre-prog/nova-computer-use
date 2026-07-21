@@ -53,20 +53,54 @@ codesign --verify --strict "$mcp_binary"
 identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info_plist")"
 [[ "$identifier" == 'dev.theodorebeaupre.NovaComputerUse.Service' ]]
 
-NOVA_MCP_BINARY="$mcp_binary" python3 - <<'PY'
+NOVA_MCP_BINARY="$mcp_binary" NOVA_SERVICE_BINARY="$service_binary" python3 - <<'PY'
 import json
 import os
+import pathlib
 import select
+import shlex
 import subprocess
+import time
+
+mcp_binary = str(pathlib.Path(os.environ["NOVA_MCP_BINARY"]).resolve())
+service_binary = str(pathlib.Path(os.environ["NOVA_SERVICE_BINARY"]).resolve())
+
+direct_service = subprocess.run(
+    [service_binary],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    timeout=2,
+)
+if direct_service.returncode == 0:
+    raise RuntimeError("service accepted unauthenticated direct launch")
+
+def service_processes():
+    output = subprocess.check_output(["ps", "-axo", "pid=,command=", "-ww"], text=True)
+    matches = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, command = stripped.partition(" ")
+        try:
+            arguments = shlex.split(command)
+        except ValueError:
+            continue
+        if arguments and arguments[0] == service_binary:
+            matches.append((int(pid_text), arguments))
+    return matches
 
 process = subprocess.Popen(
-    [os.environ["NOVA_MCP_BINARY"]],
+    [mcp_binary],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
     text=True,
     bufsize=1,
 )
+ipc_root = None
 
 def request(payload):
     process.stdin.write(json.dumps(payload) + "\n")
@@ -103,13 +137,52 @@ try:
     call_result = result.get("result")
     if not isinstance(call_result, dict) or call_result.get("isError") is not False:
         raise RuntimeError("bounded list_apps call failed")
-finally:
-    process.terminate()
+    first_processes = service_processes()
+    if len(first_processes) != 1:
+        raise RuntimeError(f"expected one persistent service, found {first_processes}")
+    first_pid, service_arguments = first_processes[0]
+    if "--ipc-token" in service_arguments:
+        raise RuntimeError("session secret leaked into service argv")
     try:
-        process.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=2)
+        socket_index = service_arguments.index("--ipc-socket")
+        socket_path = pathlib.Path(service_arguments[socket_index + 1])
+    except (ValueError, IndexError):
+        raise RuntimeError("service socket argument is missing")
+    ipc_root = socket_path.parent.parent
+    regular_files = [path for path in ipc_root.rglob("*") if path.is_file()]
+    if regular_files:
+        raise RuntimeError(f"regular IPC files found: {regular_files}")
+
+    second = request({
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "list_apps", "arguments": {}},
+    })
+    second_result = second.get("result")
+    if not isinstance(second_result, dict) or second_result.get("isError") is not False:
+        raise RuntimeError("second bounded list_apps call failed")
+    second_processes = service_processes()
+    if [pid for pid, _ in second_processes] != [first_pid]:
+        raise RuntimeError("service process was replaced between MCP calls")
+finally:
+    if process.poll() is None:
+        process.stdin.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+    deadline = time.monotonic() + 3
+    while service_processes() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    remaining = service_processes()
+    if remaining:
+        raise RuntimeError(f"service survived MCP shutdown: {remaining}")
+    if ipc_root is not None and ipc_root.exists():
+        raise RuntimeError(f"IPC root survived MCP shutdown: {ipc_root}")
 PY
 
 printf 'Release verification passed: %s\n' "$requested_plugin_root"

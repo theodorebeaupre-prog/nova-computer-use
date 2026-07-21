@@ -65,7 +65,7 @@ The helper keeps a stable bundle identifier and designated requirement across re
 
 ### NovaComputerUseMCP
 
-A small stdio MCP adapter launches the signed helper through LaunchServices and translates MCP requests into bounded newline-delimited JSON messages. It exposes six tools:
+A small stdio MCP adapter launches one signed helper through LaunchServices for the lifetime of the MCP session. It translates bounded newline-delimited MCP messages into framed JSON requests on an owner-only Unix-domain socket. The persistent helper retains the latest Accessibility snapshot so a subsequent tool call can use its element indexes. It exposes six tools:
 
 - `list_apps`
 - `get_app_state`
@@ -83,7 +83,9 @@ The app bundles a self-contained Codex plugin with its MCP manifest and Computer
 - Nova makes no network requests for computer-control operations.
 - Accessibility trees and typed text are not persisted.
 - Captures are stored only in a process-specific temporary directory.
-- A new capture removes the previous tracked capture; shutdown removes remaining tracked captures.
+- A returned capture remains available until a new capture replaces it; orderly MCP/helper shutdown removes the remaining tracked capture.
+- The MCP and helper mutually verify the exact bundled peer process path and valid code signature before dispatch. Fresh 32-byte session challenges stay in memory/on the connected socket and never appear in arguments or regular files.
+- The production helper rejects direct stdio requests. A heartbeat preserves active MCP sessions, while a 120-second authenticated-traffic idle bound cleans abandoned helpers.
 - Requests, responses, strings, accessibility traversal, and screenshots have explicit size and work bounds.
 - Input is sent only after the requested app is resolved and verified as frontmost.
 - Snapshot element indexes are local to the latest snapshot; stale references fail closed.
@@ -131,12 +133,12 @@ Repair operations are idempotent. They preserve a recoverable backup before chan
 ## Verification strategy
 
 - Unit tests cover protocol validation, app resolution, activation, accessibility bounds, capture cleanup, input validation, configuration migration, and error shaping.
-- MCP integration tests cover initialization, tool listing, request lifecycle, timeouts, malformed frames, cancellation, and child cleanup.
+- MCP integration tests cover initialization, tool listing, persistent cross-call snapshot use, capture lifetime, mutual authentication, peer rejection, idle timeout/heartbeat behavior, malformed frames, cancellation, and bounded child cleanup.
 - Build verification checks both `x86_64` and `arm64`, then creates and inspects a universal binary.
 - Bundle verification checks identifiers, manifests, signatures, designated requirements, plugin discovery, and absence of unintended dependencies.
 - UI tests cover onboarding state transitions and repair flows without altering real TCC state.
 - Manual acceptance runs the safe TextEdit flow twice from fresh Codex sessions on both Intel and Apple Silicon hardware.
-- Completion requires zero remaining helper processes and zero temporary capture files.
+- Completion requires zero remaining helper processes, session IPC directories, and temporary capture files after MCP shutdown.
 
 ## Initial scope exclusions
 

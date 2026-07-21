@@ -16,6 +16,9 @@ public final class UnixSocketListener: @unchecked Sendable {
         guard descriptor >= 0 else { throw UnixSocketIPCError.connectionFailed }
 
         do {
+            guard UnixSocketIPC.disableSIGPIPE(on: descriptor) else {
+                throw UnixSocketIPCError.connectionFailed
+            }
             var address = try UnixSocketIPC.address(for: socketURL.path)
             let result = withUnsafePointer(to: &address) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -53,7 +56,9 @@ public final class UnixSocketListener: @unchecked Sendable {
             if connection >= 0 {
                 var peerUID: uid_t = 0
                 var peerGID: gid_t = 0
-                guard getpeereid(connection, &peerUID, &peerGID) == 0, peerUID == getuid() else {
+                guard UnixSocketIPC.disableSIGPIPE(on: connection),
+                      getpeereid(connection, &peerUID, &peerGID) == 0,
+                      peerUID == getuid() else {
                     _ = Darwin.close(connection)
                     throw UnixSocketIPCError.connectionFailed
                 }
@@ -81,6 +86,24 @@ public final class UnixSocketConnection: @unchecked Sendable {
             return self.descriptor
         }
         if descriptor >= 0 { _ = Darwin.close(descriptor) }
+    }
+
+    public func peerProcessIdentifier() throws -> pid_t {
+        let descriptor = lock.withLock { self.descriptor }
+        guard descriptor >= 0 else { throw UnixSocketIPCError.connectionFailed }
+        var processIdentifier: pid_t = 0
+        var length = socklen_t(MemoryLayout.size(ofValue: processIdentifier))
+        guard Darwin.getsockopt(
+            descriptor,
+            SOL_LOCAL,
+            LOCAL_PEERPID,
+            &processIdentifier,
+            &length
+        ) == 0,
+        processIdentifier > 0 else {
+            throw UnixSocketIPCError.connectionFailed
+        }
+        return processIdentifier
     }
 
     public func write(_ data: Data, deadline: Date) async throws {
@@ -142,6 +165,10 @@ public enum UnixSocketIPC {
         while true {
             let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
             guard descriptor >= 0 else { throw UnixSocketIPCError.connectionFailed }
+            guard disableSIGPIPE(on: descriptor) else {
+                _ = Darwin.close(descriptor)
+                throw UnixSocketIPCError.connectionFailed
+            }
             let address: sockaddr_un
             do {
                 address = try self.address(for: path)
@@ -182,6 +209,17 @@ public enum UnixSocketIPC {
         return address
     }
 
+    fileprivate static func disableSIGPIPE(on descriptor: Int32) -> Bool {
+        var enabled: Int32 = 1
+        return Darwin.setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &enabled,
+            socklen_t(MemoryLayout.size(ofValue: enabled))
+        ) == 0
+    }
+
     fileprivate static func waitForRead(descriptor: Int32, deadline: Date) async throws {
         try await wait(descriptor: descriptor, events: Int16(POLLIN), deadline: deadline)
     }
@@ -192,6 +230,7 @@ public enum UnixSocketIPC {
 
     private static func wait(descriptor: Int32, events: Int16, deadline: Date) async throws {
         while true {
+            guard !Task.isCancelled else { throw UnixSocketIPCError.connectionFailed }
             let remaining = deadline.timeIntervalSinceNow
             guard remaining > 0 else { throw UnixSocketIPCError.timedOut }
             let milliseconds = Int32(max(1, min(Double(pollMilliseconds), remaining * 1_000)))

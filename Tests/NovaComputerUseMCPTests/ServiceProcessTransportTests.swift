@@ -28,15 +28,14 @@ final class ServiceProcessTransportTests: XCTestCase {
         let typedText = "do-not-persist-this-secret"
         let received = ReceivedApplicationRequest()
         let launcher = CapturingApplicationLauncher { arguments in
-            guard let socketPath = arguments.value(after: "--ipc-socket"),
-                  let token = arguments.value(after: "--ipc-token") else {
+            guard let socketPath = arguments.value(after: "--ipc-socket") else {
                 received.store(error: "Missing socket launch arguments")
                 return
             }
             Task.detached {
                 do {
                     let connection = try SocketTestClient.connect(path: socketPath)
-                    try connection.write(Data(token.utf8))
+                    try connection.authenticateAsService()
                     let requestData = try connection.readFrame()
                     let request = try JSONDecoder().decode(ServiceRequest.self, from: requestData)
                     received.store(request: request)
@@ -50,7 +49,8 @@ final class ServiceProcessTransportTests: XCTestCase {
         let transport = try ServiceApplicationTransport(
             applicationURL: fixture.applicationURL,
             ipcRoot: fixture.ipcRoot,
-            launcher: launcher
+            launcher: launcher,
+            peerVerifier: AllowingTransportPeerVerifier()
         )
 
         let result = try await transport.call(operation: .typeText, arguments: ["text": .string(typedText)])
@@ -63,6 +63,223 @@ final class ServiceProcessTransportTests: XCTestCase {
         XCTAssertEqual(try fixture.regularFiles(), [])
     }
 
+    func testApplicationTransportKeepsOneHelperSessionForSnapshotThenElementClick() async throws {
+        let fixture = try ApplicationTransportFixture()
+        let launcher = CapturingApplicationLauncher { arguments in
+            guard let socketPath = arguments.value(after: "--ipc-socket") else { return }
+            Task.detached {
+                guard let connection = try? SocketTestClient.connect(path: socketPath) else { return }
+                defer { connection.close() }
+                do {
+                    try connection.authenticateAsService()
+                    var hasSnapshot = false
+                    while true {
+                        let requestData = try connection.readFrame()
+                        let request = try JSONDecoder().decode(ServiceRequest.self, from: requestData)
+                        let response: ServiceResponse
+                        switch request.operation {
+                        case .getAppState:
+                            hasSnapshot = true
+                            response = .success(id: request.id, result: .object(["snapshot": .object([:])]))
+                        case .click where hasSnapshot:
+                            response = .success(id: request.id, result: .object(["ok": .bool(true)]))
+                        case .click:
+                            response = .failure(
+                                id: request.id,
+                                ServiceError(code: .staleSnapshot, message: "Snapshot expired")
+                            )
+                        default:
+                            response = .success(id: request.id, result: .null)
+                        }
+                        try connection.writeFrame(JSONEncoder().encode(response))
+                    }
+                } catch {
+                    // Closing the persistent socket ends the simulated helper session.
+                }
+            }
+        }
+        let transport = try ServiceApplicationTransport(
+            applicationURL: fixture.applicationURL,
+            ipcRoot: fixture.ipcRoot,
+            launcher: launcher,
+            peerVerifier: AllowingTransportPeerVerifier()
+        )
+        defer { Task { await transport.shutdown() } }
+
+        _ = try await transport.call(operation: .getAppState, arguments: ["app": .string("Notes")])
+        let click = try await transport.call(operation: .click, arguments: [
+            "app": .string("Notes"),
+            "element_index": .int(0)
+        ])
+
+        XCTAssertEqual(click, .object(["ok": .bool(true)]))
+        XCTAssertEqual(launcher.launchCount, 1)
+    }
+
+    func testApplicationTransportKeepsCaptureUntilShutdown() async throws {
+        let fixture = try ApplicationTransportFixture()
+        let captureURL = fixture.root.appendingPathComponent("capture.png")
+        let helperFinished = expectation(description: "persistent helper cleaned its capture")
+        let launcher = CapturingApplicationLauncher { arguments in
+            guard let socketPath = arguments.value(after: "--ipc-socket") else { return }
+            Task.detached {
+                guard let connection = try? SocketTestClient.connect(path: socketPath) else { return }
+                defer {
+                    connection.close()
+                    try? FileManager.default.removeItem(at: captureURL)
+                    helperFinished.fulfill()
+                }
+                do {
+                    try connection.authenticateAsService()
+                    while true {
+                        let requestData = try connection.readFrame()
+                        let request = try JSONDecoder().decode(ServiceRequest.self, from: requestData)
+                        try Data("capture".utf8).write(to: captureURL)
+                        let response = ServiceResponse.success(id: request.id, result: .object([
+                            "capture": .object(["path": .string(captureURL.path)])
+                        ]))
+                        try connection.writeFrame(JSONEncoder().encode(response))
+                    }
+                } catch {
+                    // Closing the persistent socket ends the simulated helper session.
+                }
+            }
+        }
+        let transport = try ServiceApplicationTransport(
+            applicationURL: fixture.applicationURL,
+            ipcRoot: fixture.ipcRoot,
+            launcher: launcher,
+            peerVerifier: AllowingTransportPeerVerifier()
+        )
+
+        _ = try await transport.call(operation: .getAppState, arguments: ["app": .string("Notes")])
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captureURL.path))
+
+        await transport.shutdown()
+        await fulfillment(of: [helperFinished], timeout: 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: captureURL.path))
+    }
+
+    func testApplicationTransportDoesNotPutSessionSecretInLaunchArguments() async throws {
+        let fixture = try ApplicationTransportFixture()
+        let launcher = CapturingApplicationLauncher { arguments in
+            guard let socketPath = arguments.value(after: "--ipc-socket") else { return }
+            Task.detached {
+                guard let connection = try? SocketTestClient.connect(path: socketPath) else { return }
+                defer { connection.close() }
+                do {
+                    try connection.authenticateAsService()
+                    let requestData = try connection.readFrame()
+                    let request = try JSONDecoder().decode(ServiceRequest.self, from: requestData)
+                    try connection.writeFrame(JSONEncoder().encode(
+                        ServiceResponse.success(id: request.id, result: .null)
+                    ))
+                } catch {}
+            }
+        }
+        let transport = try ServiceApplicationTransport(
+            applicationURL: fixture.applicationURL,
+            ipcRoot: fixture.ipcRoot,
+            launcher: launcher,
+            peerVerifier: AllowingTransportPeerVerifier()
+        )
+
+        _ = try await transport.call(operation: .listApps, arguments: [:])
+        await transport.shutdown()
+
+        XCTAssertFalse(launcher.arguments.contains("--ipc-token"))
+    }
+
+    func testApplicationTransportRejectsWrongHelperProofBeforeSendingRequest() async throws {
+        let fixture = try ApplicationTransportFixture()
+        let received = ReceivedApplicationRequest()
+        let launcher = CapturingApplicationLauncher { arguments in
+            guard let socketPath = arguments.value(after: "--ipc-socket") else { return }
+            Task.detached {
+                guard let connection = try? SocketTestClient.connect(path: socketPath) else { return }
+                defer { connection.close() }
+                do {
+                    let challenge = Data(repeating: 0x8A, count: ServiceSocketSession.challengeByteCount)
+                    try connection.writeFrame(challenge)
+                    _ = try connection.readFrame()
+                    try connection.writeFrame(Data(repeating: 0x17, count: ServiceSocketSession.challengeByteCount))
+                    let requestData = try connection.readFrame()
+                    received.store(request: try JSONDecoder().decode(ServiceRequest.self, from: requestData))
+                } catch {}
+            }
+        }
+        let transport = try ServiceApplicationTransport(
+            applicationURL: fixture.applicationURL,
+            ipcRoot: fixture.ipcRoot,
+            launcher: launcher,
+            peerVerifier: AllowingTransportPeerVerifier(),
+            responseTimeout: 0.1
+        )
+
+        do {
+            _ = try await transport.call(operation: .listApps, arguments: [:])
+            XCTFail("Expected helper authentication failure")
+        } catch let error as ServiceError {
+            XCTAssertEqual(error.code, .internalError)
+        }
+        await transport.shutdown()
+
+        XCTAssertNil(received.request)
+    }
+
+    func testApplicationTransportAndSocketSessionPreserveRealDispatcherStateAndCapture() async throws {
+        let fixture = try ApplicationTransportFixture()
+        let dispatcherFixture = PersistentDispatcherFixture(captureDirectory: fixture.root)
+        let helperExit = DispatchSemaphore(value: 0)
+        let applicationLaunch = WaitingApplicationLaunch(exitSignal: helperExit)
+        let launcher = CapturingApplicationLauncher(applicationLaunch: applicationLaunch) { arguments in
+            guard let socketPath = arguments.value(after: "--ipc-socket") else { return }
+            Task.detached {
+                defer { helperExit.signal() }
+                try? await ServiceSocketSession.run(
+                    socketPath: socketPath,
+                    expectedPeerCodeURL: URL(fileURLWithPath: "/tmp/NovaComputerUseMCP"),
+                    dispatcher: dispatcherFixture.dispatcher,
+                    peerVerifier: AllowingTransportPeerVerifier(),
+                    challengeGenerator: { Data(repeating: 0x3C, count: 32) },
+                    connectionTimeout: 1,
+                    authenticationTimeout: 1,
+                    idleTimeout: 0.06
+                )
+            }
+        }
+        let transport = try ServiceApplicationTransport(
+            applicationURL: fixture.applicationURL,
+            ipcRoot: fixture.ipcRoot,
+            launcher: launcher,
+            peerVerifier: AllowingTransportPeerVerifier(),
+            heartbeatInterval: 0.02
+        )
+
+        let state = try await transport.call(
+            operation: .getAppState,
+            arguments: ["app": .string("Notes")]
+        )
+        let capturePath = state.objectValue?["capture"]?.objectValue?["path"]?.stringValue
+        XCTAssertNotNil(capturePath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: capturePath!))
+        try await Task.sleep(for: .milliseconds(160))
+
+        let click = try await transport.call(operation: .click, arguments: [
+            "app": .string("Notes"),
+            "element_index": .int(0)
+        ])
+        XCTAssertEqual(click, .object(["ok": .bool(true)]))
+        XCTAssertEqual(dispatcherFixture.input.clickCount, 1)
+        XCTAssertEqual(launcher.launchCount, 1)
+
+        await transport.shutdown()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: capturePath!))
+        XCTAssertEqual(dispatcherFixture.capturer.cleanupCount, 1)
+        XCTAssertEqual(applicationLaunch.waitTimeouts, [1])
+    }
+
     func testApplicationTransportTimesOutAndRemovesItsSocketDirectory() async throws {
         let fixture = try ApplicationTransportFixture()
         let launcher = CapturingApplicationLauncher { _ in }
@@ -70,6 +287,7 @@ final class ServiceProcessTransportTests: XCTestCase {
             applicationURL: fixture.applicationURL,
             ipcRoot: fixture.ipcRoot,
             launcher: launcher,
+            peerVerifier: AllowingTransportPeerVerifier(),
             responseTimeout: 0.05
         )
 
@@ -364,9 +582,14 @@ private final class ApplicationTransportFixture {
 private final class CapturingApplicationLauncher: ServiceApplicationLaunching, @unchecked Sendable {
     private let lock = NSLock()
     private let onLaunch: @Sendable ([String]) -> Void
+    private let applicationLaunch: any ServiceApplicationLaunch
     private var recordedArguments: [String] = []
 
-    init(onLaunch: @escaping @Sendable ([String]) -> Void) {
+    init(
+        applicationLaunch: any ServiceApplicationLaunch = TestApplicationLaunch(),
+        onLaunch: @escaping @Sendable ([String]) -> Void
+    ) {
+        self.applicationLaunch = applicationLaunch
         self.onLaunch = onLaunch
     }
 
@@ -374,16 +597,47 @@ private final class CapturingApplicationLauncher: ServiceApplicationLaunching, @
         lock.withLock { recordedArguments }
     }
 
+    var launchCount: Int {
+        lock.withLock { recordedLaunchCount }
+    }
+
+    private var recordedLaunchCount = 0
+
     func launch(applicationURL: URL, arguments: [String]) throws -> any ServiceApplicationLaunch {
-        lock.withLock { recordedArguments = arguments }
+        lock.withLock {
+            recordedArguments = arguments
+            recordedLaunchCount += 1
+        }
         onLaunch(arguments)
-        return TestApplicationLaunch()
+        return applicationLaunch
     }
 }
 
 private final class TestApplicationLaunch: ServiceApplicationLaunch, @unchecked Sendable {
     var isRunning: Bool { true }
+    func waitForExit(timeout: TimeInterval) -> Bool { true }
     func terminate() {}
+    func kill() {}
+}
+
+private final class WaitingApplicationLaunch: ServiceApplicationLaunch, @unchecked Sendable {
+    private let exitSignal: DispatchSemaphore
+    private let lock = NSLock()
+    private(set) var waitTimeouts: [TimeInterval] = []
+
+    init(exitSignal: DispatchSemaphore) {
+        self.exitSignal = exitSignal
+    }
+
+    var isRunning: Bool { true }
+
+    func waitForExit(timeout: TimeInterval) -> Bool {
+        lock.withLock { waitTimeouts.append(timeout) }
+        return exitSignal.wait(timeout: .now() + timeout) == .success
+    }
+
+    func terminate() {}
+    func kill() {}
 }
 
 private final class ReceivedApplicationRequest: @unchecked Sendable {
@@ -400,6 +654,141 @@ private final class ReceivedApplicationRequest: @unchecked Sendable {
 
     func store(error: String) {
         lock.withLock { storedError = error }
+    }
+}
+
+private struct AllowingTransportPeerVerifier: PeerProcessIdentityVerifying {
+    func isValidPeer(processIdentifier: pid_t, expectedCodeAt url: URL) -> Bool { true }
+}
+
+private final class PersistentDispatcherFixture: @unchecked Sendable {
+    let inspector = PersistentInspector()
+    let input = PersistentInput()
+    let capturer: PersistentCapturer
+    let dispatcher: ServiceDispatcher
+
+    init(captureDirectory: URL) {
+        capturer = PersistentCapturer(directory: captureDirectory)
+        dispatcher = ServiceDispatcher(
+            catalog: PersistentCatalog(),
+            inspector: inspector,
+            elementResolver: inspector,
+            input: input,
+            applicationActivator: PersistentActivator(),
+            permissions: PersistentPermissions(),
+            screenCapturer: capturer
+        )
+    }
+}
+
+private struct PersistentCatalog: ApplicationCataloging {
+    func applications() -> [ApplicationDescriptor] { [.persistentFixture] }
+    func resolve(_ query: String) throws -> ApplicationDescriptor { .persistentFixture }
+}
+
+private struct PersistentActivator: ApplicationActivating {
+    func activateAndVerifyFrontmost(_ app: ApplicationDescriptor) -> Bool { true }
+}
+
+private struct PersistentPermissions: PermissionChecking {
+    func hasAccessibilityPermission() -> Bool { true }
+    func hasScreenRecordingPermission() -> Bool { true }
+}
+
+private final class PersistentInspector: AccessibilityInspecting, SnapshotElementReferenceResolving, @unchecked Sendable {
+    private var hasSnapshot = false
+
+    func snapshot(app: ApplicationDescriptor, maxDepth: Int, maxElements: Int) throws -> AccessibilitySnapshot {
+        hasSnapshot = true
+        return AccessibilitySnapshot(
+            token: UUID(),
+            app: app,
+            text: "Save",
+            elements: [.persistentFixture]
+        )
+    }
+
+    func element(snapshotToken: UUID, index: Int) throws -> SnapshotElement { .persistentFixture }
+
+    func resolveElementReference(snapshotToken: UUID, index: Int) throws -> SnapshotElementReference {
+        try resolveLatestElementReference(app: .persistentFixture, index: index)
+    }
+
+    func resolveLatestElementReference(app: ApplicationDescriptor, index: Int) throws -> SnapshotElementReference {
+        guard hasSnapshot else {
+            throw ServiceError(code: .staleSnapshot, message: "Snapshot expired")
+        }
+        return SnapshotElementReference(axReference: AXElementReference(identifier: "persistent"))
+    }
+
+    func latestElement(app: ApplicationDescriptor, index: Int) throws -> SnapshotElement {
+        guard hasSnapshot else {
+            throw ServiceError(code: .staleSnapshot, message: "Snapshot expired")
+        }
+        return .persistentFixture
+    }
+}
+
+private final class PersistentInput: InputControlling, @unchecked Sendable {
+    private(set) var clickCount = 0
+    func validate(coordinate: CGPoint) throws {}
+    func click(element: SnapshotElementReference?, coordinate: CGPoint?, button: MouseButton, count: Int) throws {
+        clickCount += 1
+    }
+    func typeText(_ text: String) throws {}
+    func pressKey(_ key: String) throws {}
+    func scroll(direction: ScrollDirection, pages: Int, anchor: CGPoint?) throws {}
+}
+
+private final class PersistentCapturer: ScreenCapturing, @unchecked Sendable {
+    let path: URL
+    private(set) var cleanupCount = 0
+
+    init(directory: URL) {
+        path = directory.appendingPathComponent("persistent-capture.png")
+    }
+
+    func captureMainDisplay() async throws -> CaptureResult {
+        try Data("capture".utf8).write(to: path)
+        return CaptureResult(path: path.path, displayID: 1, width: 1, height: 1)
+    }
+
+    func cleanup() {
+        Thread.sleep(forTimeInterval: 0.1)
+        cleanupCount += 1
+        try? FileManager.default.removeItem(at: path)
+    }
+}
+
+private extension ApplicationDescriptor {
+    static let persistentFixture = ApplicationDescriptor(
+        name: "Notes",
+        bundleIdentifier: "com.apple.Notes",
+        path: "/System/Applications/Notes.app",
+        processIdentifier: 42
+    )
+}
+
+private extension SnapshotElement {
+    static let persistentFixture = SnapshotElement(
+        index: 0,
+        role: "AXButton",
+        title: "Save",
+        value: nil,
+        frame: SnapshotFrame(x: 10, y: 10, width: 20, height: 20),
+        actions: ["AXPress"]
+    )
+}
+
+private extension JSONValue {
+    var objectValue: [String: JSONValue]? {
+        guard case .object(let value) = self else { return nil }
+        return value
+    }
+
+    var stringValue: String? {
+        guard case .string(let value) = self else { return nil }
+        return value
     }
 }
 
@@ -460,6 +849,17 @@ private final class SocketTestClient {
         var length = UInt32(data.count).bigEndian
         try withUnsafeBytes(of: &length) { try write(Data($0)) }
         try write(data)
+    }
+
+    func authenticateAsService() throws {
+        let challenge = Data(repeating: 0xC7, count: ServiceSocketSession.challengeByteCount)
+        try writeFrame(challenge)
+        let response = try readFrame()
+        guard response.count == ServiceSocketSession.challengeByteCount * 2,
+              Data(response.prefix(ServiceSocketSession.challengeByteCount)) == challenge else {
+            throw POSIXError(.EAUTH)
+        }
+        try writeFrame(Data(response.suffix(ServiceSocketSession.challengeByteCount)))
     }
 
     func readFrame() throws -> Data {

@@ -17,7 +17,7 @@ struct SystemPermissionChecker: PermissionChecking {
     }
 }
 
-public final class ServiceDispatcher {
+public final class ServiceDispatcher: @unchecked Sendable {
     private let catalog: any ApplicationCataloging
     private let inspector: any AccessibilityInspecting
     private let elementResolver: any SnapshotElementReferenceResolving

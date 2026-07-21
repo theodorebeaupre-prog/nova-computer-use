@@ -169,47 +169,56 @@ private actor NDJSONCodec {
     }
 }
 
-private final class ServiceTerminationSignals: @unchecked Sendable {
+final class ServiceTerminationSignals: @unchecked Sendable {
     private let sources: [DispatchSourceSignal]
 
-    init(input: FileHandle) {
+    init(onTermination: @escaping @Sendable () -> Void) {
         signal(SIGPIPE, SIG_IGN)
         signal(SIGINT, SIG_IGN)
         signal(SIGTERM, SIG_IGN)
         sources = [SIGINT, SIGTERM].map { signalNumber in
             let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global())
-            source.setEventHandler { try? input.close() }
+            source.setEventHandler(handler: onTermination)
             source.resume()
             return source
         }
     }
 }
 
+func siblingMCPURL(serviceApplicationURL: URL) -> URL {
+    serviceApplicationURL.deletingLastPathComponent()
+        .appendingPathComponent("NovaComputerUseMCP")
+}
+
 signal(SIGPIPE, SIG_IGN)
-let dispatcher = ServiceDispatcher()
 let arguments = CommandLine.arguments
-if let socketIndex = arguments.firstIndex(of: "--ipc-socket"),
-   let tokenIndex = arguments.firstIndex(of: "--ipc-token"),
-   arguments.indices.contains(socketIndex + 1),
-   arguments.indices.contains(tokenIndex + 1) {
-    let deadline = Date().addingTimeInterval(30)
-    do {
-        let connection = try await UnixSocketIPC.connect(path: arguments[socketIndex + 1], deadline: deadline)
-        defer { connection.close() }
-        try await connection.write(Data(arguments[tokenIndex + 1].utf8), deadline: deadline)
-        let requestData = try await connection.readFrame(deadline: deadline)
-        guard let request = try? JSONDecoder().decode(ServiceRequest.self, from: requestData) else {
-            exit(EXIT_FAILURE)
-        }
-        let response = await dispatcher.handle(request)
-        let responseData = try JSONEncoder().encode(response)
-        try await connection.writeFrame(responseData, deadline: deadline)
-        dispatcher.cleanup()
-    } catch {
-        exit(EXIT_FAILURE)
-    }
-} else {
-    let terminationSignals = ServiceTerminationSignals(input: .standardInput)
-    await ServiceLoop.run(input: .standardInput, output: .standardOutput, dispatcher: dispatcher)
+guard arguments.count == 3,
+      arguments[1] == "--ipc-socket",
+      arguments[2].hasPrefix("/") else {
+    FileHandle.standardError.write(Data("NovaComputerUseService: authenticated IPC session required\n".utf8))
+    exit(EXIT_FAILURE)
+}
+
+let serviceApplicationURL = Bundle.main.bundleURL.standardizedFileURL.resolvingSymlinksInPath()
+guard serviceApplicationURL.pathExtension == "app" else {
+    FileHandle.standardError.write(Data("NovaComputerUseService: bundled app launch required\n".utf8))
+    exit(EXIT_FAILURE)
+}
+
+let dispatcher = ServiceDispatcher()
+let session = Task {
+    try await ServiceSocketSession.run(
+        socketPath: arguments[2],
+        expectedPeerCodeURL: siblingMCPURL(serviceApplicationURL: serviceApplicationURL),
+        dispatcher: dispatcher
+    )
+}
+let terminationSignals = ServiceTerminationSignals { session.cancel() }
+do {
+    try await session.value
     withExtendedLifetime(terminationSignals) {}
+} catch {
+    withExtendedLifetime(terminationSignals) {}
+    FileHandle.standardError.write(Data("NovaComputerUseService: authenticated IPC session failed\n".utf8))
+    exit(EXIT_FAILURE)
 }

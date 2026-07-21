@@ -93,7 +93,7 @@ flowchart LR
     S -->|"bounded result"| M
 ```
 
-The MCP adapter starts the app helper through LaunchServices so permissions belong to the stable helper bundle identifier `dev.theodorebeaupre.NovaComputerUse.Service`. Request and response payloads travel through an owner-only Unix-domain socket and are not written as regular IPC files.
+The MCP adapter starts one app-helper process through LaunchServices for the lifetime of each MCP session, so permissions belong to the stable helper bundle identifier `dev.theodorebeaupre.NovaComputerUse.Service` and Accessibility snapshot indexes remain usable by the next tool call. Request and response payloads travel through a `0600` Unix-domain socket inside a `0700` session directory and are not written as regular IPC files. Before dispatching a request, both processes verify that the peer is the exact bundled, validly signed executable and complete a fresh 32-byte challenge in each direction. These session secrets exist only in memory and on the connected socket, never in arguments or regular files. Direct stdio use of the helper is rejected.
 
 ## Security Model
 
@@ -101,7 +101,9 @@ The MCP adapter starts the app helper through LaunchServices so permissions belo
 
 - Computer-control operations contain no network requests.
 - Typed text and Accessibility trees are exchanged in memory and are not intentionally persisted by Nova.
-- The current display capture is a temporary PNG. Nova removes the previous tracked capture before replacement and cleans tracked captures on normal shutdown; a later service start sweeps stale Nova PNGs left by an interrupted process.
+- The current display capture is a temporary PNG. Its returned path remains usable for the MCP session until the next capture replaces it or orderly MCP/helper shutdown removes it; a later service start sweeps stale Nova PNGs left by an interrupted process.
+- One authenticated helper and its Accessibility snapshot state are retained across MCP tool calls. A 30-second heartbeat keeps the session alive, while the helper independently exits and cleans up after 120 seconds without authenticated traffic.
+- The helper accepts requests only from the exact bundled MCP executable over the owner-only socket. The MCP applies the reciprocal code-signature and path check before sending a request.
 - Input is sent only after Nova resolves the requested running app and verifies it became frontmost.
 - Accessibility element indexes belong to the latest snapshot for that app. Replaced snapshots fail closed with `stale_snapshot`.
 - IPC frames and MCP response lines are capped at 1 MiB; Accessibility snapshots and attributes have smaller explicit limits.
@@ -129,7 +131,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer scripts/build-universal
 scripts/verify-release.sh dist/NovaComputerUsePlugin
 ```
 
-The release verifier parses both manifests and the helper plist, checks both Mach-O slices and code signatures, verifies the helper identifier, negotiates MCP, requires exactly the six documented tools, and performs a bounded `list_apps` call.
+The release verifier parses both manifests and the helper plist, checks both Mach-O slices and code signatures, verifies the helper identifier, rejects direct helper use, negotiates MCP, requires exactly the six documented tools, and performs two bounded `list_apps` calls through the same helper process. It also checks that no session secret appears in process arguments or regular IPC files and that the helper and IPC directory disappear after MCP shutdown.
 
 ## Troubleshooting
 

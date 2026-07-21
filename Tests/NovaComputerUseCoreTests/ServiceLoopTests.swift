@@ -226,32 +226,132 @@ final class ServiceLoopTests: XCTestCase {
         ))
     }
 
-    func testServiceSIGINTAndSIGTERMExitThroughNormalCleanup() async throws {
+    func testServiceRejectsUnauthenticatedDirectStdioMode() async throws {
         let serviceURL = try builtServiceURL()
+        let process = Process()
+        let input = Pipe()
+        let output = Pipe()
+        process.executableURL = serviceURL
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = output
+        let terminated = expectation(description: "service rejects unauthenticated stdio")
+        process.terminationHandler = { _ in terminated.fulfill() }
+        try process.run()
 
-        for signalNumber in [SIGINT, SIGTERM] {
-            let process = Process()
-            let input = Pipe()
-            let output = Pipe()
-            process.executableURL = serviceURL
-            process.standardInput = input
-            process.standardOutput = output
-            process.standardError = output
-            let terminated = expectation(description: "service exits for signal \(signalNumber)")
-            process.terminationHandler = { _ in terminated.fulfill() }
-            try process.run()
-            try await Task.sleep(for: .milliseconds(50))
+        await fulfillment(of: [terminated], timeout: 1)
 
-            XCTAssertEqual(Darwin.kill(process.processIdentifier, signalNumber), 0)
-            await fulfillment(of: [terminated], timeout: 2)
+        XCTAssertEqual(process.terminationReason, .exit)
+        XCTAssertNotEqual(process.terminationStatus, 0)
+        try? input.fileHandleForWriting.close()
+        try? input.fileHandleForReading.close()
+        try? output.fileHandleForWriting.close()
+        try? output.fileHandleForReading.close()
+    }
 
-            XCTAssertEqual(process.terminationReason, .exit)
-            XCTAssertEqual(process.terminationStatus, 0)
-            try? input.fileHandleForWriting.close()
-            try? input.fileHandleForReading.close()
-            try? output.fileHandleForWriting.close()
-            try? output.fileHandleForReading.close()
+    func testSocketSessionRejectsWrongChallengeResponseBeforeDispatch() async throws {
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("ncu-auth-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let socketURL = directory.appendingPathComponent("session.sock")
+        let listener = try UnixSocketListener(socketURL: socketURL)
+        let fixtures = LoopFixtures()
+        let expectedChallenge = Data(repeating: 0xA5, count: 32)
+        let session = Task {
+            try await ServiceSocketSession.run(
+                socketPath: socketURL.path,
+                expectedPeerCodeURL: URL(fileURLWithPath: "/tmp/NovaComputerUseMCP"),
+                dispatcher: fixtures.dispatcher,
+                peerVerifier: AllowingPeerVerifier(),
+                challengeGenerator: { expectedChallenge },
+                connectionTimeout: 1,
+                authenticationTimeout: 1,
+                idleTimeout: 1
+            )
         }
+        let connection = try await listener.accept(deadline: Date().addingTimeInterval(1))
+        let challenge = try await connection.readFrame(deadline: Date().addingTimeInterval(1))
+        XCTAssertEqual(challenge, expectedChallenge)
+        try await connection.writeFrame(Data(repeating: 0x5A, count: 32), deadline: Date().addingTimeInterval(1))
+
+        do {
+            try await session.value
+            XCTFail("Expected authentication failure")
+        } catch let error as ServiceSocketSessionError {
+            XCTAssertEqual(error, .authenticationFailed)
+        }
+
+        XCTAssertEqual(fixtures.catalog.applicationsCount, 0)
+        XCTAssertEqual(fixtures.capturer.cleanupCount, 1)
+    }
+
+    func testSocketSessionRejectsUntrustedPeerBeforeDispatch() async throws {
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("ncu-identity-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let socketURL = directory.appendingPathComponent("session.sock")
+        let listener = try UnixSocketListener(socketURL: socketURL)
+        let fixtures = LoopFixtures()
+        let session = Task {
+            try await ServiceSocketSession.run(
+                socketPath: socketURL.path,
+                expectedPeerCodeURL: URL(fileURLWithPath: "/tmp/NovaComputerUseMCP"),
+                dispatcher: fixtures.dispatcher,
+                peerVerifier: DenyingPeerVerifier(),
+                challengeGenerator: { Data(repeating: 0x2E, count: 32) },
+                connectionTimeout: 1,
+                authenticationTimeout: 0.05,
+                idleTimeout: 1
+            )
+        }
+        let connection = try await listener.accept(deadline: Date().addingTimeInterval(1))
+        defer { connection.close() }
+
+        do {
+            try await session.value
+            XCTFail("Expected peer identity rejection")
+        } catch let error as ServiceSocketSessionError {
+            XCTAssertEqual(error, .peerIdentityRejected)
+        }
+
+        XCTAssertEqual(fixtures.catalog.applicationsCount, 0)
+        XCTAssertEqual(fixtures.capturer.cleanupCount, 1)
+    }
+
+    func testSocketSessionIdleTimeoutCleansUpOnce() async throws {
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("ncu-idle-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let socketURL = directory.appendingPathComponent("session.sock")
+        let listener = try UnixSocketListener(socketURL: socketURL)
+        let fixtures = LoopFixtures()
+        let session = Task {
+            try await ServiceSocketSession.run(
+                socketPath: socketURL.path,
+                expectedPeerCodeURL: URL(fileURLWithPath: "/tmp/NovaComputerUseMCP"),
+                dispatcher: fixtures.dispatcher,
+                peerVerifier: AllowingPeerVerifier(),
+                challengeGenerator: { Data(repeating: 0x1D, count: 32) },
+                connectionTimeout: 1,
+                authenticationTimeout: 1,
+                idleTimeout: 0.05
+            )
+        }
+        let connection = try await listener.accept(deadline: Date().addingTimeInterval(1))
+        let challenge = try await connection.readFrame(deadline: Date().addingTimeInterval(1))
+        let peerChallenge = Data(repeating: 0xC7, count: ServiceSocketSession.challengeByteCount)
+        var authenticationResponse = challenge
+        authenticationResponse.append(peerChallenge)
+        try await connection.writeFrame(authenticationResponse, deadline: Date().addingTimeInterval(1))
+        let peerProof = try await connection.readFrame(deadline: Date().addingTimeInterval(1))
+        XCTAssertEqual(peerProof, peerChallenge)
+
+        try await session.value
+
+        XCTAssertEqual(fixtures.capturer.cleanupCount, 1)
     }
 }
 
@@ -392,4 +492,12 @@ private final class CleanupCountingCapturer: ScreenCapturing, @unchecked Sendabl
     func cleanup() {
         cleanupCount += 1
     }
+}
+
+private struct AllowingPeerVerifier: PeerProcessIdentityVerifying {
+    func isValidPeer(processIdentifier: pid_t, expectedCodeAt url: URL) -> Bool { true }
+}
+
+private struct DenyingPeerVerifier: PeerProcessIdentityVerifying {
+    func isValidPeer(processIdentifier: pid_t, expectedCodeAt url: URL) -> Bool { false }
 }

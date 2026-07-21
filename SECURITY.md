@@ -26,3 +26,5 @@ Nova has not published a stable release yet. Security fixes currently target the
 ## Security Boundaries
 
 Nova's native computer-control engine makes no network requests, but it operates with macOS Accessibility and Screen Recording permissions and passes results to its MCP client. Those permissions can expose sensitive on-screen data and cause real UI side effects. Review the guarantees and limitations in the [README](README.md#security-model) before testing or deploying Nova.
+
+The privileged helper has no production stdio request mode. It accepts framed requests only over an owner-only local socket after mutual, session-scoped challenges and reciprocal validation of the exact bundled MCP/helper process path and code signature. The bundled MCP executable and user-owned installation directory are therefore inside Nova's local trust boundary; Nova does not claim to protect against an attacker who already controls the user's account or can replace trusted installed binaries.

@@ -533,7 +533,7 @@ actor ServiceApplicationTransport: ServiceTransport {
               let connection = currentConnection else { return }
         isHeartbeatInProgress = true
         defer { isHeartbeatInProgress = false }
-        let deadline = Date().addingTimeInterval(min(responseTimeout, heartbeatInterval))
+        let deadline = Date().addingTimeInterval(responseTimeout)
         do {
             try await connection.writeFrame(Data(), deadline: deadline)
             let response = try await connection.readFrame(deadline: deadline)

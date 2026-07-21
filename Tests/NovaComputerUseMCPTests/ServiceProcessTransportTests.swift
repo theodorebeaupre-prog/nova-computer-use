@@ -245,7 +245,7 @@ final class ServiceProcessTransportTests: XCTestCase {
                     challengeGenerator: { Data(repeating: 0x3C, count: 32) },
                     connectionTimeout: 1,
                     authenticationTimeout: 1,
-                    idleTimeout: 0.06
+                    idleTimeout: 1
                 )
             }
         }
@@ -254,7 +254,7 @@ final class ServiceProcessTransportTests: XCTestCase {
             ipcRoot: fixture.ipcRoot,
             launcher: launcher,
             peerVerifier: AllowingTransportPeerVerifier(),
-            heartbeatInterval: 0.02
+            heartbeatInterval: 0.1
         )
 
         let state = try await transport.call(
@@ -264,7 +264,7 @@ final class ServiceProcessTransportTests: XCTestCase {
         let capturePath = state.objectValue?["capture"]?.objectValue?["path"]?.stringValue
         XCTAssertNotNil(capturePath)
         XCTAssertTrue(FileManager.default.fileExists(atPath: capturePath!))
-        try await Task.sleep(for: .milliseconds(160))
+        try await Task.sleep(for: .milliseconds(1_250))
 
         let click = try await transport.call(operation: .click, arguments: [
             "app": .string("Notes"),

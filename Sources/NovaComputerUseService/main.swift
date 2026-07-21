@@ -188,27 +188,22 @@ private final class ServiceTerminationSignals: @unchecked Sendable {
 signal(SIGPIPE, SIG_IGN)
 let dispatcher = ServiceDispatcher()
 let arguments = CommandLine.arguments
-if let requestIndex = arguments.firstIndex(of: "--request-file"),
-   let responseIndex = arguments.firstIndex(of: "--response-file"),
-   arguments.indices.contains(requestIndex + 1),
-   arguments.indices.contains(responseIndex + 1) {
-    let requestURL = URL(fileURLWithPath: arguments[requestIndex + 1]).standardizedFileURL
-    let responseURL = URL(fileURLWithPath: arguments[responseIndex + 1]).standardizedFileURL
-    let ipcRoot = FileManager.default.temporaryDirectory
-        .appendingPathComponent("NovaComputerUseIPC", isDirectory: true)
-        .standardizedFileURL
-    let requestIsLocal = requestURL.path.hasPrefix(ipcRoot.path + "/")
-    let responseIsLocal = responseURL.path.hasPrefix(ipcRoot.path + "/")
-
-    guard requestIsLocal, responseIsLocal,
-          let requestData = try? Data(contentsOf: requestURL),
-          let request = try? JSONDecoder().decode(ServiceRequest.self, from: requestData) else {
-        exit(EXIT_FAILURE)
-    }
-    let response = await dispatcher.handle(request)
-    guard let responseData = try? JSONEncoder().encode(response) else { exit(EXIT_FAILURE) }
+if let socketIndex = arguments.firstIndex(of: "--ipc-socket"),
+   let tokenIndex = arguments.firstIndex(of: "--ipc-token"),
+   arguments.indices.contains(socketIndex + 1),
+   arguments.indices.contains(tokenIndex + 1) {
+    let deadline = Date().addingTimeInterval(30)
     do {
-        try responseData.write(to: responseURL, options: .atomic)
+        let connection = try await UnixSocketIPC.connect(path: arguments[socketIndex + 1], deadline: deadline)
+        defer { connection.close() }
+        try await connection.write(Data(arguments[tokenIndex + 1].utf8), deadline: deadline)
+        let requestData = try await connection.readFrame(deadline: deadline)
+        guard let request = try? JSONDecoder().decode(ServiceRequest.self, from: requestData) else {
+            exit(EXIT_FAILURE)
+        }
+        let response = await dispatcher.handle(request)
+        let responseData = try JSONEncoder().encode(response)
+        try await connection.writeFrame(responseData, deadline: deadline)
         dispatcher.cleanup()
     } catch {
         exit(EXIT_FAILURE)

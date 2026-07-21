@@ -264,27 +264,82 @@ actor ServiceProcessTransport: ServiceTransport {
     }
 }
 
+protocol ServiceApplicationLaunch: AnyObject, Sendable {
+    var isRunning: Bool { get }
+    func terminate()
+}
+
+protocol ServiceApplicationLaunching: Sendable {
+    func launch(applicationURL: URL, arguments: [String]) throws -> any ServiceApplicationLaunch
+}
+
+private final class FoundationServiceApplicationLaunch: ServiceApplicationLaunch, @unchecked Sendable {
+    private let process: Process
+
+    init(process: Process) {
+        self.process = process
+    }
+
+    var isRunning: Bool { process.isRunning }
+
+    func terminate() {
+        if process.isRunning { process.terminate() }
+    }
+}
+
+private struct FoundationServiceApplicationLauncher: ServiceApplicationLaunching {
+    func launch(applicationURL: URL, arguments: [String]) throws -> any ServiceApplicationLaunch {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.standardError
+        try process.run()
+        return FoundationServiceApplicationLaunch(process: process)
+    }
+}
+
 actor ServiceApplicationTransport: ServiceTransport {
     private let applicationURL: URL
     private let ipcRoot: URL
+    private let removesIPCRootOnShutdown: Bool
+    private let launcher: any ServiceApplicationLaunching
     private let responseTimeout: TimeInterval
-    private var currentLauncher: Process?
+    private var currentLauncher: (any ServiceApplicationLaunch)?
+    private var currentListener: UnixSocketListener?
+    private var currentConnection: UnixSocketConnection?
     private var isShutDown = false
+    private var isCallInProgress = false
 
-    init(applicationURL: URL, responseTimeout: TimeInterval = 30) throws {
+    init(
+        applicationURL: URL,
+        ipcRoot: URL? = nil,
+        launcher: any ServiceApplicationLaunching = FoundationServiceApplicationLauncher(),
+        responseTimeout: TimeInterval = 30
+    ) throws {
         self.applicationURL = applicationURL
+        self.launcher = launcher
         self.responseTimeout = responseTimeout
-        ipcRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("NovaComputerUseIPC", isDirectory: true)
+        removesIPCRootOnShutdown = ipcRoot == nil
+        self.ipcRoot = ipcRoot ?? URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("ncu-\(UUID().uuidString.prefix(12))", isDirectory: true)
         try FileManager.default.createDirectory(
-            at: ipcRoot,
+            at: self.ipcRoot,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        guard Darwin.chmod(self.ipcRoot.path, 0o700) == 0 else {
+            throw ServiceError(code: .internalError, message: "Unable to create NovaComputerUse IPC directory")
+        }
     }
 
     func call(operation: ServiceOperation, arguments: [String: JSONValue]) async throws -> JSONValue {
         guard !isShutDown else { throw serviceExitedError }
+        guard !isCallInProgress else {
+            throw ServiceError(code: .internalError, message: "Concurrent service calls are unsupported")
+        }
+        isCallInProgress = true
+        defer { isCallInProgress = false }
         let callDirectory = ipcRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(
             at: callDirectory,
@@ -294,56 +349,76 @@ actor ServiceApplicationTransport: ServiceTransport {
         defer { try? FileManager.default.removeItem(at: callDirectory) }
 
         let id = UUID().uuidString
-        let requestURL = callDirectory.appendingPathComponent("request.json")
-        let responseURL = callDirectory.appendingPathComponent("response.json")
-        let request = ServiceRequest(id: id, operation: operation, arguments: arguments)
-        try JSONEncoder().encode(request).write(to: requestURL, options: .atomic)
-
-        let launcher = Process()
-        launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        launcher.arguments = [
+        let socketURL = callDirectory.appendingPathComponent("s")
+        let listener = try UnixSocketListener(socketURL: socketURL)
+        currentListener = listener
+        let token = UUID().uuidString
+        let request = try JSONEncoder().encode(ServiceRequest(id: id, operation: operation, arguments: arguments))
+        let launchArguments = [
             "-W", "-n", "-a", applicationURL.path, "--args",
-            "--request-file", requestURL.path,
-            "--response-file", responseURL.path
+            "--ipc-socket", socketURL.path,
+            "--ipc-token", token
         ]
-        launcher.standardOutput = FileHandle.nullDevice
-        launcher.standardError = FileHandle.standardError
-        currentLauncher = launcher
+
+        let launchedApplication: any ServiceApplicationLaunch
         do {
-            try launcher.run()
+            launchedApplication = try launcher.launch(applicationURL: applicationURL, arguments: launchArguments)
         } catch {
             currentLauncher = nil
             throw serviceExitedError
         }
+        currentLauncher = launchedApplication
+        defer {
+            currentConnection?.close()
+            currentConnection = nil
+            currentListener?.close()
+            currentListener = nil
+            if launchedApplication.isRunning { launchedApplication.terminate() }
+            currentLauncher = nil
+        }
 
         let deadline = Date().addingTimeInterval(responseTimeout)
-        while Date() < deadline, !isShutDown {
-            if let data = try? Data(contentsOf: responseURL), !data.isEmpty {
-                currentLauncher = nil
-                if launcher.isRunning { launcher.terminate() }
-                guard let response = try? JSONDecoder().decode(ServiceResponse.self, from: data),
-                      response.id == id else {
-                    throw ServiceError(code: .internalError, message: "Invalid response from NovaComputerUseService")
-                }
-                switch response {
-                case .success(_, let result): return result
-                case .failure(_, let error): throw error
-                }
+        do {
+            let connection = try await listener.accept(deadline: deadline)
+            currentConnection = connection
+            let presentedToken = try await connection.readExactly(token.utf8.count, deadline: deadline)
+            guard presentedToken == Data(token.utf8) else {
+                throw ServiceError(code: .internalError, message: "Invalid response from NovaComputerUseService")
             }
-            try? await Task.sleep(for: .milliseconds(50))
+            try await connection.writeFrame(request, deadline: deadline)
+            let responseData = try await connection.readFrame(deadline: deadline)
+            guard let response = try? JSONDecoder().decode(ServiceResponse.self, from: responseData),
+                  response.id == id else {
+                throw ServiceError(code: .internalError, message: "Invalid response from NovaComputerUseService")
+            }
+            switch response {
+            case .success(_, let result): return result
+            case .failure(_, let error): throw error
+            }
+        } catch UnixSocketIPCError.timedOut {
+            throw isShutDown ? serviceExitedError : ServiceError(
+                code: .internalError,
+                message: "NovaComputerUseService response timed out"
+            )
+        } catch let error as ServiceError {
+            throw error
+        } catch {
+            throw isShutDown ? serviceExitedError : ServiceError(
+                code: .internalError,
+                message: "Invalid response from NovaComputerUseService"
+            )
         }
-        currentLauncher = nil
-        if launcher.isRunning { launcher.terminate() }
-        throw isShutDown ? serviceExitedError : ServiceError(
-            code: .internalError,
-            message: "NovaComputerUseService response timed out"
-        )
     }
 
     func shutdown() {
         isShutDown = true
-        if let currentLauncher, currentLauncher.isRunning { currentLauncher.terminate() }
+        currentConnection?.close()
+        currentConnection = nil
+        currentListener?.close()
+        currentListener = nil
+        currentLauncher?.terminate()
         currentLauncher = nil
+        if removesIPCRootOnShutdown { try? FileManager.default.removeItem(at: ipcRoot) }
     }
 
     private var serviceExitedError: ServiceError {

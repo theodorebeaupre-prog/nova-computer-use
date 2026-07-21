@@ -26,7 +26,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testObjectUsingFormerIntegralDoubleKeyRoundTripsAsObject() throws {
-        let value = JSONValue.object(["$sentient_computer_use_integral_double": .int(7)])
+        let value = JSONValue.object(["$nova_computer_use_integral_double": .int(7)])
         let data = try JSONEncoder().encode(value)
         XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: data), value)
     }

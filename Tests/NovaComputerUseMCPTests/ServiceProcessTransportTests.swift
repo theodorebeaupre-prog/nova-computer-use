@@ -23,6 +23,70 @@ final class ServiceProcessTransportTests: XCTestCase {
         )
     }
 
+    func testApplicationTransportSendsTypedTextOnlyOverSocketAndLeavesNoRegularFiles() async throws {
+        let fixture = try ApplicationTransportFixture()
+        let typedText = "do-not-persist-this-secret"
+        let received = ReceivedApplicationRequest()
+        let launcher = CapturingApplicationLauncher { arguments in
+            guard let socketPath = arguments.value(after: "--ipc-socket"),
+                  let token = arguments.value(after: "--ipc-token") else {
+                received.store(error: "Missing socket launch arguments")
+                return
+            }
+            Task.detached {
+                do {
+                    let connection = try SocketTestClient.connect(path: socketPath)
+                    try connection.write(Data(token.utf8))
+                    let requestData = try connection.readFrame()
+                    let request = try JSONDecoder().decode(ServiceRequest.self, from: requestData)
+                    received.store(request: request)
+                    let response = try JSONEncoder().encode(ServiceResponse.success(id: request.id, result: .null))
+                    try connection.writeFrame(response)
+                } catch {
+                    received.store(error: String(describing: error))
+                }
+            }
+        }
+        let transport = try ServiceApplicationTransport(
+            applicationURL: fixture.applicationURL,
+            ipcRoot: fixture.ipcRoot,
+            launcher: launcher
+        )
+
+        let result = try await transport.call(operation: .typeText, arguments: ["text": .string(typedText)])
+
+        XCTAssertEqual(result, .null)
+        XCTAssertNil(received.error)
+        XCTAssertEqual(received.request?.operation, .typeText)
+        XCTAssertEqual(received.request?.arguments["text"], .string(typedText))
+        XCTAssertFalse(launcher.arguments.joined(separator: " ").contains(typedText))
+        XCTAssertEqual(try fixture.regularFiles(), [])
+    }
+
+    func testApplicationTransportTimesOutAndRemovesItsSocketDirectory() async throws {
+        let fixture = try ApplicationTransportFixture()
+        let launcher = CapturingApplicationLauncher { _ in }
+        let transport = try ServiceApplicationTransport(
+            applicationURL: fixture.applicationURL,
+            ipcRoot: fixture.ipcRoot,
+            launcher: launcher,
+            responseTimeout: 0.05
+        )
+
+        do {
+            _ = try await transport.call(operation: .listApps, arguments: [:])
+            XCTFail("Expected a bounded response timeout")
+        } catch let error as ServiceError {
+            XCTAssertEqual(error, ServiceError(
+                code: .internalError,
+                message: "NovaComputerUseService response timed out"
+            ))
+        }
+
+        XCTAssertEqual(try fixture.regularFiles(), [])
+        XCTAssertEqual(try fixture.childEntries(), [])
+    }
+
     func testShutdownReturnsAfterGracefulChildExitWithoutSignals() async throws {
         let process = FakeServiceChildProcess(waitResults: [true])
         let fixtures = try TransportFixtures(process: process)
@@ -260,5 +324,168 @@ private final class FakeServiceChildProcess: ServiceChildProcess, @unchecked Sen
 
     func kill() {
         lock.withLock { killCount += 1 }
+    }
+}
+
+private final class ApplicationTransportFixture {
+    let root: URL
+    let ipcRoot: URL
+    let applicationURL = URL(fileURLWithPath: "/Applications/NovaComputerUseService.app")
+
+    init() throws {
+        root = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("ncu-test-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        ipcRoot = root.appendingPathComponent("ipc", isDirectory: true)
+        try FileManager.default.createDirectory(at: ipcRoot, withIntermediateDirectories: true)
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    func regularFiles() throws -> [URL] {
+        let enumerator = FileManager.default.enumerator(
+            at: ipcRoot,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        )
+        return try (enumerator?.allObjects as? [URL] ?? []).filter {
+            try $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
+        }
+    }
+
+    func childEntries() throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(
+            at: ipcRoot,
+            includingPropertiesForKeys: nil
+        )
+    }
+}
+
+private final class CapturingApplicationLauncher: ServiceApplicationLaunching, @unchecked Sendable {
+    private let lock = NSLock()
+    private let onLaunch: @Sendable ([String]) -> Void
+    private var recordedArguments: [String] = []
+
+    init(onLaunch: @escaping @Sendable ([String]) -> Void) {
+        self.onLaunch = onLaunch
+    }
+
+    var arguments: [String] {
+        lock.withLock { recordedArguments }
+    }
+
+    func launch(applicationURL: URL, arguments: [String]) throws -> any ServiceApplicationLaunch {
+        lock.withLock { recordedArguments = arguments }
+        onLaunch(arguments)
+        return TestApplicationLaunch()
+    }
+}
+
+private final class TestApplicationLaunch: ServiceApplicationLaunch, @unchecked Sendable {
+    var isRunning: Bool { true }
+    func terminate() {}
+}
+
+private final class ReceivedApplicationRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedRequest: ServiceRequest?
+    private var storedError: String?
+
+    var request: ServiceRequest? { lock.withLock { storedRequest } }
+    var error: String? { lock.withLock { storedError } }
+
+    func store(request: ServiceRequest) {
+        lock.withLock { storedRequest = request }
+    }
+
+    func store(error: String) {
+        lock.withLock { storedError = error }
+    }
+}
+
+private final class SocketTestClient {
+    private let descriptor: Int32
+
+    private init(descriptor: Int32) {
+        self.descriptor = descriptor
+    }
+
+    deinit { close() }
+
+    static func connect(path: String) throws -> SocketTestClient {
+        let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw POSIXError(.ENOTSOCK) }
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        guard pathBytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
+            _ = Darwin.close(descriptor)
+            throw POSIXError(.ENAMETOOLONG)
+        }
+        withUnsafeMutableBytes(of: &address.sun_path) { destination in
+            destination.initializeMemory(as: UInt8.self, repeating: 0)
+            destination.copyBytes(from: pathBytes)
+        }
+        do {
+            let result = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            guard result == 0 else { throw POSIXError(.ECONNREFUSED) }
+        } catch {
+            _ = Darwin.close(descriptor)
+            throw error
+        }
+        return SocketTestClient(descriptor: descriptor)
+    }
+
+    func close() {
+        _ = Darwin.close(descriptor)
+    }
+
+    func write(_ data: Data) throws {
+        var written = 0
+        try data.withUnsafeBytes { bytes in
+            while written < bytes.count {
+                let result = Darwin.write(descriptor, bytes.baseAddress!.advanced(by: written), bytes.count - written)
+                guard result > 0 else { throw POSIXError(.EPIPE) }
+                written += result
+            }
+        }
+    }
+
+    func writeFrame(_ data: Data) throws {
+        var length = UInt32(data.count).bigEndian
+        try withUnsafeBytes(of: &length) { try write(Data($0)) }
+        try write(data)
+    }
+
+    func readFrame() throws -> Data {
+        let prefix = try readExactly(4)
+        let length = prefix.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        guard length <= 1 * 1024 * 1024 else { throw POSIXError(.EMSGSIZE) }
+        return try readExactly(Int(length))
+    }
+
+    private func readExactly(_ count: Int) throws -> Data {
+        var data = Data()
+        while data.count < count {
+            var buffer = [UInt8](repeating: 0, count: count - data.count)
+            let result = buffer.withUnsafeMutableBytes {
+                Darwin.read(descriptor, $0.baseAddress, $0.count)
+            }
+            guard result > 0 else { throw POSIXError(.ECONNRESET) }
+            data.append(contentsOf: buffer.prefix(result))
+        }
+        return data
+    }
+}
+
+private extension Array where Element == String {
+    func value(after flag: String) -> String? {
+        guard let index = firstIndex(of: flag), indices.contains(index + 1) else { return nil }
+        return self[index + 1]
     }
 }

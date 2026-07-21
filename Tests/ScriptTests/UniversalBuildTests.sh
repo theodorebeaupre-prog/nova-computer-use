@@ -89,6 +89,8 @@ assert_contains 'build -c release --arch arm64 --scratch-path' "$fixture_root/lo
 grep -Fq -- '-create ' "$fixture_root/log"
 grep -Fq -- 'CFBundleIdentifier' "$repository_root/dist/NovaComputerUsePlugin/bin/NovaComputerUseService.app/Contents/Info.plist"
 grep -Fq -- 'dev.theodorebeaupre.NovaComputerUse.Service' "$repository_root/dist/NovaComputerUsePlugin/bin/NovaComputerUseService.app/Contents/Info.plist"
+cmp "$repository_root/LICENSE" "$repository_root/dist/NovaComputerUsePlugin/LICENSE"
+cmp "$repository_root/THIRD_PARTY_NOTICES.md" "$repository_root/dist/NovaComputerUsePlugin/THIRD_PARTY_NOTICES.md"
 grep -Fq -- 'codesign --force --sign -' "$fixture_root/log"
 grep -Eq '^xattr -cr .*/NovaComputerUseService\.app/Contents/MacOS/NovaComputerUseService$' "$fixture_root/log"
 grep -Eq '^xattr -cr .*/NovaComputerUseService\.app$' "$fixture_root/log"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 plugin_root="${1:-}"
 if [[ -z "$plugin_root" ]]; then
     printf 'Usage: %s path/to/NovaComputerUsePlugin\n' "$0" >&2
@@ -24,6 +25,8 @@ info_plist="$service_application/Contents/Info.plist"
 [[ -x "$mcp_binary" ]]
 [[ -x "$service_binary" ]]
 [[ -f "$info_plist" ]]
+cmp "$repository_root/LICENSE" "$plugin_root/LICENSE"
+cmp "$repository_root/THIRD_PARTY_NOTICES.md" "$plugin_root/THIRD_PARTY_NOTICES.md"
 
 python3 - "$plugin_root" <<'PY'
 import json

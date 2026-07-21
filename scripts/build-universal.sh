@@ -88,6 +88,8 @@ cat > "$stage_root/bin/NovaComputerUseService.app/Contents/Info.plist" <<'PLIST'
 PLIST
 
 cp -R "$repository_root/Plugin/." "$stage_root/"
+cp "$repository_root/LICENSE" "$stage_root/LICENSE"
+cp "$repository_root/THIRD_PARTY_NOTICES.md" "$stage_root/THIRD_PARTY_NOTICES.md"
 xattr -cr "$stage_root"
 
 service_application="$stage_root/bin/NovaComputerUseService.app"

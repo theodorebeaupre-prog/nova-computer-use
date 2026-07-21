@@ -20,5 +20,3 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). N
 - Requests and responses moved from regular files to an owner-only Unix-domain socket with in-memory framed payloads.
 - Typed text and Accessibility trees are not persisted by Nova; temporary PNG captures are replaced and cleaned on shutdown or a later stale-file sweep.
 - Installation validates manifests, architectures, code signatures, and the stable helper identifier before publication.
-
-[Unreleased]: https://github.com/theodorebeaupre-prog/nova-computer-use/commits/main

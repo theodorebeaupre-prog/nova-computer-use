@@ -161,6 +161,6 @@ If local installation says `Run scripts/build-universal.sh first.`, return to th
 
 ## Contributing, Security, and License
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. For a vulnerability, **do not open a public issue**; follow [SECURITY.md](SECURITY.md) and use GitHub private vulnerability reporting.
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. For a vulnerability, **do not open a public issue**; follow [SECURITY.md](SECURITY.md) for the current reporting status.
 
-NOVA COMPUTER USE is licensed under the [GNU Affero General Public License v3.0 only](LICENSE). It was derived from the AGPL-3.0 Computer Use module in the [Sentient OS source repository](https://github.com/jesaitech/sentient-os) at extraction commit [`4ad3f32`](https://github.com/jesaitech/sentient-os/commit/4ad3f326f68726b98b69f7e3e769e824f194507b). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the preserved attribution.
+NOVA COMPUTER USE is licensed under the [GNU Affero General Public License v3.0 only](LICENSE). It was derived from the AGPL-3.0 Sentient OS Computer Use module at extraction commit `4ad3f32`. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the preserved attribution.

@@ -306,15 +306,13 @@ final class ServiceLoopTests: XCTestCase {
                 idleTimeout: 1
             )
         }
-        let connection = try await listener.accept(deadline: Date().addingTimeInterval(1))
-        defer { connection.close() }
-
         do {
             try await session.value
             XCTFail("Expected peer identity rejection")
         } catch let error as ServiceSocketSessionError {
             XCTAssertEqual(error, .peerIdentityRejected)
         }
+        withExtendedLifetime(listener) {}
 
         XCTAssertEqual(fixtures.catalog.applicationsCount, 0)
         XCTAssertEqual(fixtures.capturer.cleanupCount, 1)

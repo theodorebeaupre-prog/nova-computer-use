@@ -3,9 +3,9 @@ name: computer-use
 description: Control local Mac apps through Computer Use for tasks that require reading or operating app UI. Prefer purpose-built connectors, APIs, or CLIs when available.
 ---
 
-# Intel Mac Computer Use
+# Mac Computer Use
 
-Use the local `computer-use` MCP server for all direct Mac app interactions. Prefer a dedicated connector, API, or CLI when one can complete the task.
+Use the local `computer-use` MCP server for all direct Mac app interactions. The bundled native service is built as a universal `x86_64`/`arm64` binary; physical Apple Silicon acceptance is still pending. Prefer a dedicated connector, API, or CLI when one can complete the task.
 
 ## Available tools
 

@@ -83,7 +83,7 @@ The app bundles a self-contained Codex plugin with its MCP manifest and Computer
 - Nova makes no network requests for computer-control operations.
 - Accessibility trees and typed text are not persisted.
 - Captures are stored only in a process-specific temporary directory.
-- A returned capture remains available until a new capture replaces it; orderly MCP/helper shutdown removes the remaining tracked capture.
+- A returned capture remains available until a successfully finalized replacement exists. Failed capture or PNG finalization preserves it and removes the partial candidate; orderly MCP/helper shutdown removes all remaining tracked captures.
 - The MCP and helper mutually verify the exact bundled peer process path and valid code signature before dispatch. Fresh 32-byte session challenges stay in memory/on the connected socket and never appear in arguments or regular files.
 - The production helper rejects direct stdio requests. A heartbeat preserves active MCP sessions, while a 120-second authenticated-traffic idle bound cleans abandoned helpers.
 - Requests, responses, strings, accessibility traversal, and screenshots have explicit size and work bounds.

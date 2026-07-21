@@ -380,8 +380,12 @@ actor ServiceApplicationTransport: ServiceTransport {
             let connection = try await sessionConnection(deadline: deadline)
             try await connection.writeFrame(request, deadline: deadline)
             let responseData = try await connection.readFrame(deadline: deadline)
-            guard let response = try? JSONDecoder().decode(ServiceResponse.self, from: responseData),
-                  response.id == id else {
+            guard let response = try? JSONDecoder().decode(ServiceResponse.self, from: responseData) else {
+                breakSession()
+                throw ServiceError(code: .internalError, message: "Invalid response from NovaComputerUseService")
+            }
+            guard response.id == id else {
+                breakSession()
                 throw ServiceError(code: .internalError, message: "Invalid response from NovaComputerUseService")
             }
             switch response {

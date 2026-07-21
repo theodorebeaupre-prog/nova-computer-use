@@ -228,6 +228,69 @@ final class ServiceProcessTransportTests: XCTestCase {
         XCTAssertNil(received.request)
     }
 
+    func testApplicationTransportBreaksSessionAfterMalformedAuthenticatedResponse() async throws {
+        let fixture = try ApplicationTransportFixture()
+        let launcher = twoResponseApplicationLauncher { _ in Data("not-json".utf8) }
+        let transport = try ServiceApplicationTransport(
+            applicationURL: fixture.applicationURL,
+            ipcRoot: fixture.ipcRoot,
+            launcher: launcher,
+            peerVerifier: AllowingTransportPeerVerifier()
+        )
+
+        await assertInvalidApplicationResponse(from: transport)
+        XCTAssertEqual(try fixture.childEntries(), [])
+        await assertApplicationSessionExited(transport)
+        await transport.shutdown()
+    }
+
+    func testApplicationTransportBreaksSessionAfterMismatchedAuthenticatedResponse() async throws {
+        let fixture = try ApplicationTransportFixture()
+        let launcher = twoResponseApplicationLauncher { _ in
+            try! JSONEncoder().encode(ServiceResponse.success(id: "wrong", result: .null))
+        }
+        let transport = try ServiceApplicationTransport(
+            applicationURL: fixture.applicationURL,
+            ipcRoot: fixture.ipcRoot,
+            launcher: launcher,
+            peerVerifier: AllowingTransportPeerVerifier()
+        )
+
+        await assertInvalidApplicationResponse(from: transport)
+        XCTAssertEqual(try fixture.childEntries(), [])
+        await assertApplicationSessionExited(transport)
+        await transport.shutdown()
+    }
+
+    func testApplicationTransportPreservesSessionAfterValidServiceError() async throws {
+        let fixture = try ApplicationTransportFixture()
+        let expectedError = ServiceError(code: .invalidRequest, message: "Fixture service error")
+        let launcher = twoResponseApplicationLauncher { request in
+            try! JSONEncoder().encode(ServiceResponse.failure(id: request.id, expectedError))
+        }
+        let transport = try ServiceApplicationTransport(
+            applicationURL: fixture.applicationURL,
+            ipcRoot: fixture.ipcRoot,
+            launcher: launcher,
+            peerVerifier: AllowingTransportPeerVerifier()
+        )
+
+        do {
+            _ = try await transport.call(operation: .listApps, arguments: [:])
+            XCTFail("Expected helper-returned service error")
+        } catch let error as ServiceError {
+            XCTAssertEqual(error, expectedError)
+        } catch {
+            XCTFail("Expected ServiceError, got \(error)")
+        }
+
+        XCTAssertFalse(try fixture.childEntries().isEmpty)
+        let secondResult = try await transport.call(operation: .listApps, arguments: [:])
+        XCTAssertEqual(secondResult, .null)
+        XCTAssertEqual(launcher.launchCount, 1)
+        await transport.shutdown()
+    }
+
     func testApplicationTransportAndSocketSessionPreserveRealDispatcherStateAndCapture() async throws {
         let fixture = try ApplicationTransportFixture()
         let dispatcherFixture = PersistentDispatcherFixture(captureDirectory: fixture.root)
@@ -477,6 +540,46 @@ final class ServiceProcessTransportTests: XCTestCase {
             XCTFail("Expected ServiceError, got \(error)", file: file, line: line)
         }
     }
+
+    private func assertInvalidApplicationResponse(
+        from transport: ServiceApplicationTransport,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await transport.call(operation: .listApps, arguments: [:])
+            XCTFail("Expected invalid helper response", file: file, line: line)
+        } catch let error as ServiceError {
+            XCTAssertEqual(
+                error,
+                ServiceError(code: .internalError, message: "Invalid response from NovaComputerUseService"),
+                file: file,
+                line: line
+            )
+        } catch {
+            XCTFail("Expected ServiceError, got \(error)", file: file, line: line)
+        }
+    }
+
+    private func assertApplicationSessionExited(
+        _ transport: ServiceApplicationTransport,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await transport.call(operation: .listApps, arguments: [:])
+            XCTFail("Expected broken application session", file: file, line: line)
+        } catch let error as ServiceError {
+            XCTAssertEqual(
+                error,
+                ServiceError(code: .internalError, message: "NovaComputerUseService exited"),
+                file: file,
+                line: line
+            )
+        } catch {
+            XCTFail("Expected ServiceError, got \(error)", file: file, line: line)
+        }
+    }
 }
 
 private extension ChildShutdownTimeouts {
@@ -618,6 +721,36 @@ private final class TestApplicationLaunch: ServiceApplicationLaunch, @unchecked 
     func waitForExit(timeout: TimeInterval) -> Bool { true }
     func terminate() {}
     func kill() {}
+}
+
+private func twoResponseApplicationLauncher(
+    firstResponse: @escaping @Sendable (ServiceRequest) -> Data
+) -> CapturingApplicationLauncher {
+    CapturingApplicationLauncher { arguments in
+        guard let socketPath = arguments.value(after: "--ipc-socket") else { return }
+        Task.detached {
+            guard let connection = try? SocketTestClient.connect(path: socketPath) else { return }
+            defer { connection.close() }
+            do {
+                try connection.authenticateAsService()
+                for responseIndex in 0..<2 {
+                    let requestData = try connection.readFrame()
+                    let request = try JSONDecoder().decode(ServiceRequest.self, from: requestData)
+                    let responseData: Data
+                    if responseIndex == 0 {
+                        responseData = firstResponse(request)
+                    } else {
+                        responseData = try JSONEncoder().encode(
+                            ServiceResponse.success(id: request.id, result: .null)
+                        )
+                    }
+                    try connection.writeFrame(responseData)
+                }
+            } catch {
+                // A broken transport closes the authenticated session after the first response.
+            }
+        }
+    }
 }
 
 private final class WaitingApplicationLaunch: ServiceApplicationLaunch, @unchecked Sendable {

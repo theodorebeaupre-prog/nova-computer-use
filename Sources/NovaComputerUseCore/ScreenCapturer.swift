@@ -36,6 +36,10 @@ protocol ScreenCaptureBacking {
     func captureMainDisplay() async throws -> CapturedScreenImage
 }
 
+protocol ScreenCapturePNGWriting {
+    func writePNG(_ image: CGImage, to url: URL) throws
+}
+
 enum ScreenCaptureDisplaySelection {
     static func mainDisplayIndex(in displayIDs: [UInt32], mainDisplayID: UInt32) throws -> Int {
         guard let index = displayIDs.firstIndex(of: mainDisplayID) else {
@@ -47,6 +51,7 @@ enum ScreenCaptureDisplaySelection {
 
 public final class ScreenCapturer: ScreenCapturing {
     private let backend: any ScreenCaptureBacking
+    private let pngWriter: any ScreenCapturePNGWriting
     private let temporaryDirectory: URL
     private let processIdentifier: Int32
     private var captureURLs: Set<URL> = []
@@ -57,23 +62,32 @@ public final class ScreenCapturer: ScreenCapturing {
 
     init(
         backend: any ScreenCaptureBacking,
+        pngWriter: any ScreenCapturePNGWriting = ImageIOScreenCapturePNGWriter(),
         temporaryDirectory: URL = FileManager.default.temporaryDirectory,
         processIdentifier: Int32 = getpid()
     ) {
         self.backend = backend
+        self.pngWriter = pngWriter
         self.temporaryDirectory = temporaryDirectory
         self.processIdentifier = processIdentifier
         sweepStaleCaptures()
     }
 
     public func captureMainDisplay() async throws -> CaptureResult {
-        cleanup()
         let captured = try await backend.captureMainDisplay()
         let directory = temporaryDirectory.appendingPathComponent("NovaComputerUse", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let path = directory.appendingPathComponent("\(processIdentifier)-\(UUID().uuidString).png")
-        try Self.writePNG(captured.image, to: path)
+        do {
+            try pngWriter.writePNG(captured.image, to: path)
+        } catch {
+            try? FileManager.default.removeItem(at: path)
+            throw error
+        }
+
+        let previousCaptureURLs = captureURLs
         captureURLs.insert(path)
+        removeTrackedCaptures(previousCaptureURLs)
         return CaptureResult(
             path: path.path,
             displayID: captured.displayID,
@@ -83,14 +97,20 @@ public final class ScreenCapturer: ScreenCapturing {
     }
 
     public func cleanup() {
-        captureURLs = Set(captureURLs.filter { url in
+        removeTrackedCaptures(captureURLs)
+    }
+
+    private func removeTrackedCaptures(_ urls: Set<URL>) {
+        for url in urls {
             do {
                 try FileManager.default.removeItem(at: url)
-                return false
+                captureURLs.remove(url)
             } catch {
-                return true
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    captureURLs.remove(url)
+                }
             }
-        })
+        }
     }
 
     deinit {
@@ -122,8 +142,10 @@ public final class ScreenCapturer: ScreenCapturing {
         if Darwin.kill(processIdentifier, 0) == 0 { return true }
         return errno == EPERM
     }
+}
 
-    private static func writePNG(_ image: CGImage, to url: URL) throws {
+private struct ImageIOScreenCapturePNGWriter: ScreenCapturePNGWriting {
+    func writePNG(_ image: CGImage, to url: URL) throws {
         guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else {
             throw ServiceError(code: .captureFailed, message: "Unable to encode display capture")
         }

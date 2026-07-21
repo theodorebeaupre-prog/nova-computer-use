@@ -101,7 +101,7 @@ The MCP adapter starts one app-helper process through LaunchServices for the lif
 
 - Computer-control operations contain no network requests.
 - Typed text and Accessibility trees are exchanged in memory and are not intentionally persisted by Nova.
-- The current display capture is a temporary PNG. Its returned path remains usable for the MCP session until the next capture replaces it or orderly MCP/helper shutdown removes it; a later service start sweeps stale Nova PNGs left by an interrupted process.
+- The current display capture is a temporary PNG. Its returned path remains usable until a successfully finalized capture replaces it or orderly MCP/helper shutdown removes it. Failed backend captures or PNG finalization preserve the prior path and remove any partial candidate; a later service start sweeps stale Nova PNGs left by an interrupted process.
 - One authenticated helper and its Accessibility snapshot state are retained across MCP tool calls. A 30-second heartbeat keeps the session alive, while the helper independently exits and cleans up after 120 seconds without authenticated traffic.
 - The helper accepts requests only from the exact bundled MCP executable over the owner-only socket. The MCP applies the reciprocal code-signature and path check before sending a request.
 - Input is sent only after Nova resolves the requested running app and verifies it became frontmost.

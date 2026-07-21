@@ -68,6 +68,57 @@ final class ScreenCapturerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: second.path))
     }
 
+    func testBackendFailurePreservesPreviousCapture() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NovaComputerUseTests-\(UUID().uuidString)", isDirectory: true)
+        let capturer = ScreenCapturer(
+            backend: FailingAfterFirstScreenCaptureBackend(image: try makeImage()),
+            temporaryDirectory: directory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let first = try await capturer.captureMainDisplay()
+        do {
+            _ = try await capturer.captureMainDisplay()
+            XCTFail("Expected backend capture failure")
+        } catch ScreenCaptureFixtureError.backendFailure {}
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: first.path))
+        XCTAssertEqual(
+            try Data(contentsOf: URL(fileURLWithPath: first.path)).prefix(8),
+            Data([137, 80, 78, 71, 13, 10, 26, 10])
+        )
+
+        capturer.cleanup()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.path))
+    }
+
+    func testPNGFinalizationFailurePreservesPreviousCaptureAndDeletesCandidate() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NovaComputerUseTests-\(UUID().uuidString)", isDirectory: true)
+        let writer = FailingAfterWritingSecondPNGWriter()
+        let capturer = ScreenCapturer(
+            backend: FakeScreenCaptureBackend(image: try makeImage()),
+            pngWriter: writer,
+            temporaryDirectory: directory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let first = try await capturer.captureMainDisplay()
+        do {
+            _ = try await capturer.captureMainDisplay()
+            XCTFail("Expected PNG finalization failure")
+        } catch ScreenCaptureFixtureError.pngFinalizationFailure {}
+
+        XCTAssertEqual(writer.attemptedURLs.count, 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: first.path))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: first.path)), Data("complete".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: writer.attemptedURLs[1].path))
+
+        capturer.cleanup()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.path))
+    }
+
     func testMainDisplaySelectionRejectsUnavailableMainDisplay() {
         XCTAssertThrowsError(try ScreenCaptureDisplaySelection.mainDisplayIndex(in: [2, 3], mainDisplayID: 1)) {
             XCTAssertEqual($0 as? ServiceError, ServiceError(code: .captureFailed, message: "Main display is unavailable"))
@@ -107,6 +158,38 @@ private final class FakeScreenCaptureBackend: ScreenCaptureBacking {
         captureCount += 1
         return CapturedScreenImage(displayID: 42, image: image)
     }
+}
+
+private final class FailingAfterFirstScreenCaptureBackend: ScreenCaptureBacking {
+    private let image: CGImage
+    private var captureCount = 0
+
+    init(image: CGImage) {
+        self.image = image
+    }
+
+    func captureMainDisplay() async throws -> CapturedScreenImage {
+        captureCount += 1
+        guard captureCount == 1 else { throw ScreenCaptureFixtureError.backendFailure }
+        return CapturedScreenImage(displayID: 42, image: image)
+    }
+}
+
+private final class FailingAfterWritingSecondPNGWriter: ScreenCapturePNGWriting {
+    private(set) var attemptedURLs: [URL] = []
+
+    func writePNG(_ image: CGImage, to url: URL) throws {
+        attemptedURLs.append(url)
+        try Data(attemptedURLs.count == 1 ? "complete".utf8 : "partial".utf8).write(to: url)
+        if attemptedURLs.count == 2 {
+            throw ScreenCaptureFixtureError.pngFinalizationFailure
+        }
+    }
+}
+
+private enum ScreenCaptureFixtureError: Error {
+    case backendFailure
+    case pngFinalizationFailure
 }
 
 private func makeImage() throws -> CGImage {

@@ -95,14 +95,19 @@ cp "$repository_root/LICENSE" "$stage_root/LICENSE"
 cp "$repository_root/THIRD_PARTY_NOTICES.md" "$stage_root/THIRD_PARTY_NOTICES.md"
 xattr -cr "$stage_root"
 
+sign_args=(--force --sign "${CODE_SIGN_IDENTITY:--}")
+if [[ "${CODE_SIGN_IDENTITY:--}" != "-" ]]; then
+    sign_args+=(--options runtime --timestamp)
+fi
+
 service_application="$stage_root/bin/NovaComputerUseService.app"
 service_executable="$service_application/Contents/MacOS/NovaComputerUseService"
 xattr -cr "$service_executable"
-codesign --force --sign "${CODE_SIGN_IDENTITY:--}" "$service_executable"
+codesign "${sign_args[@]}" "$service_executable"
 xattr -cr "$service_application"
-codesign --force --sign "${CODE_SIGN_IDENTITY:--}" "$service_application"
+codesign "${sign_args[@]}" "$service_application"
 xattr -cr "$stage_root/bin/NovaComputerUseMCP"
-codesign --force --sign "${CODE_SIGN_IDENTITY:--}" "$stage_root/bin/NovaComputerUseMCP"
+codesign "${sign_args[@]}" "$stage_root/bin/NovaComputerUseMCP"
 
 publish_root="$(mktemp -d "$dist_root/.NovaComputerUsePlugin.staging.XXXXXX")"
 rmdir "$publish_root"

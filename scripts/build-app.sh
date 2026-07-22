@@ -6,6 +6,10 @@ dist_root="$repository_root/dist"
 app_path="$dist_root/Nova.app"
 scratch_root="$(mktemp -d "${TMPDIR:-/tmp}/nova-app-build.XXXXXX")"
 identity="${CODE_SIGN_IDENTITY:--}"
+sign_args=(--force --sign "$identity")
+if [[ "$identity" != "-" ]]; then
+    sign_args+=(--options runtime --timestamp)
+fi
 
 cleanup() { rm -rf -- "$scratch_root"; }
 trap cleanup EXIT
@@ -52,10 +56,10 @@ plutil -insert NSHighResolutionCapable -bool YES "$stage/Contents/Info.plist"
 plutil -insert NSHumanReadableCopyright -string 'Copyright © 2026 Théodore Beaupré' "$stage/Contents/Info.plist"
 
 xattr -cr "$stage"
-codesign --force --sign "$identity" "$stage/Contents/Resources/dist/NovaComputerUsePlugin/bin/NovaComputerUseMCP"
-codesign --force --sign "$identity" "$stage/Contents/Resources/dist/NovaComputerUsePlugin/bin/NovaComputerUseService.app/Contents/MacOS/NovaComputerUseService"
-codesign --force --sign "$identity" "$stage/Contents/Resources/dist/NovaComputerUsePlugin/bin/NovaComputerUseService.app"
-codesign --force --sign "$identity" --options runtime --timestamp=none "$stage"
+codesign "${sign_args[@]}" "$stage/Contents/Resources/dist/NovaComputerUsePlugin/bin/NovaComputerUseMCP"
+codesign "${sign_args[@]}" "$stage/Contents/Resources/dist/NovaComputerUsePlugin/bin/NovaComputerUseService.app/Contents/MacOS/NovaComputerUseService"
+codesign "${sign_args[@]}" "$stage/Contents/Resources/dist/NovaComputerUsePlugin/bin/NovaComputerUseService.app"
+codesign "${sign_args[@]}" "$stage"
 codesign --verify --deep --strict "$stage"
 
 rm -rf -- "$app_path"

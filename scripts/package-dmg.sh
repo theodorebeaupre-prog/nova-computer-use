@@ -71,6 +71,9 @@ device=""
 
 rm -f -- "$dmg" "$dmg.sha256"
 hdiutil convert -quiet "$read_write_image" -format UDZO -imagekey zlib-level=9 -o "$dmg"
+if [[ -n "${CODE_SIGN_IDENTITY:-}" && "${CODE_SIGN_IDENTITY}" != "-" ]]; then
+    codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp "$dmg"
+fi
 shasum -a 256 "$dmg" > "$dmg.sha256"
 "$repository_root/scripts/verify-dmg.sh" "$dmg"
 printf 'Packaged custom Nova DMG: %s\n' "$dmg"

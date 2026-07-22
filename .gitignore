@@ -8,3 +8,4 @@ dist/
 *.xccheckout
 *.png
 !.github/**/*.png
+!Assets/DMG/*.png

@@ -8,7 +8,7 @@
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-663399)](LICENSE)
 
 > [!IMPORTANT]
-> The native engine and local installation scripts are available now. The beginner-friendly SwiftUI installer and signed, notarized DMG are **in development**. There is no published release archive yet.
+> The native engine, SwiftUI installer source, and local development packaging are available now. A Developer ID-signed and notarized public DMG has **not** been released yet.
 
 ## Why Nova
 
@@ -45,6 +45,22 @@ Nova accepts an app's display name, executable path, or bundle identifier. Prefi
 Nova requires macOS 15 or newer and a Swift 6 toolchain. The package declares both native executables and the reusable `NovaComputerUseCore` library in [Package.swift](Package.swift).
 
 ## Quick Start
+
+### Build the Nova app
+
+Build the universal SwiftUI installer and a local-development DMG:
+
+```bash
+scripts/build-app.sh
+scripts/verify-app.sh dist/Nova.app
+scripts/package-dmg.sh
+open dist/Nova.app
+```
+
+The DMG uses Nova’s custom spatial installation background and a fixed drag-to-Applications layout.
+Nova also ships with its exploding-star application icon in every standard macOS size from 16 to 1024 pixels.
+
+The app guides users through compatibility checks, macOS permission panes, plugin installation, repair, a safe TextEdit test, and uninstall. Local builds are ad-hoc signed, so macOS permissions may need to be granted again after rebuilding. Stable permission identity requires the future Developer ID-signed release.
 
 ### Build from source
 
@@ -129,6 +145,9 @@ Run the packaging fixture, build both architectures, and verify the real distrib
 bash Tests/ScriptTests/UniversalBuildTests.sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer scripts/build-universal.sh
 scripts/verify-release.sh dist/NovaComputerUsePlugin
+scripts/build-app.sh
+scripts/verify-app.sh dist/Nova.app
+scripts/package-dmg.sh
 ```
 
 The release verifier parses both manifests and the helper plist, checks both Mach-O slices and code signatures, verifies the helper identifier, rejects direct helper use, negotiates MCP, requires exactly the six documented tools, and performs two bounded `list_apps` calls through the same helper process. It also checks that no session secret appears in process arguments or regular IPC files and that the helper and IPC directory disappear after MCP shutdown.
@@ -156,7 +175,8 @@ If local installation says `Run scripts/build-universal.sh first.`, return to th
 - [x] Native Swift engine with six bounded MCP tools
 - [x] Universal `x86_64` + `arm64` build and verification scripts
 - [x] Validated, reversible local installation scripts
-- [ ] Beginner-friendly SwiftUI installer and health dashboard — **in development**
+- [x] Beginner-friendly SwiftUI installer and health dashboard source
+- [x] Universal local-development app and DMG packaging
 - [ ] Developer ID-signed, notarized DMG release
 - [ ] Apple Silicon real-hardware acceptance
 - [ ] Repeatable manual hardware acceptance on both architectures

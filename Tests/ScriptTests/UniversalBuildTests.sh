@@ -84,8 +84,10 @@ run_build() {
 make_shims
 run_build
 
-assert_contains 'build -c release --arch x86_64 --scratch-path' "$fixture_root/log"
-assert_contains 'build -c release --arch arm64 --scratch-path' "$fixture_root/log"
+assert_contains 'build -c release --arch x86_64 --product NovaComputerUseService --scratch-path' "$fixture_root/log"
+assert_contains 'build -c release --arch x86_64 --product NovaComputerUseMCP --scratch-path' "$fixture_root/log"
+assert_contains 'build -c release --arch arm64 --product NovaComputerUseService --scratch-path' "$fixture_root/log"
+assert_contains 'build -c release --arch arm64 --product NovaComputerUseMCP --scratch-path' "$fixture_root/log"
 grep -Fq -- '-create ' "$fixture_root/log"
 grep -Fq -- 'CFBundleIdentifier' "$repository_root/dist/NovaComputerUsePlugin/bin/NovaComputerUseService.app/Contents/Info.plist"
 grep -Fq -- 'dev.theodorebeaupre.NovaComputerUse.Service' "$repository_root/dist/NovaComputerUsePlugin/bin/NovaComputerUseService.app/Contents/Info.plist"

@@ -8,3 +8,7 @@ dist/
 *.xccheckout
 *.png
 !.github/**/*.png
+!Assets/DMG/*.png
+!Assets/AppIcon/*.png
+!Assets/AppIcon/*.icns
+!Assets/AppIcon/Nova.iconset/*.png

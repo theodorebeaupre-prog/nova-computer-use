@@ -58,6 +58,7 @@ open dist/Nova.app
 ```
 
 The DMG uses Nova’s custom spatial installation background and a fixed drag-to-Applications layout.
+Nova also ships with its exploding-star application icon in every standard macOS size from 16 to 1024 pixels.
 
 The app guides users through compatibility checks, macOS permission panes, plugin installation, repair, a safe TextEdit test, and uninstall. Local builds are ad-hoc signed, so macOS permissions may need to be granted again after rebuilding. Stable permission identity requires the future Developer ID-signed release.
 
